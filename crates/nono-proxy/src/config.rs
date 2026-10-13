@@ -1471,16 +1471,29 @@ fn normalize_path(path: &str) -> String {
 /// is exempt, and literal `.`/`..` segments are resolved consistently by
 /// both sides.
 fn path_is_ambiguous(path: &str) -> bool {
+    ambiguous_path_reason(path).is_some()
+}
+
+/// The construct that makes `path` ambiguous for [`path_is_ambiguous`], or
+/// `None` when the path is not ambiguous. The intercept denial log surfaces
+/// it so an operator can tell an encoded-separator rejection apart from a
+/// plain "no rule matched" (issue #1956).
+#[must_use]
+pub(crate) fn ambiguous_path_reason(path: &str) -> Option<&'static str> {
     let path = path.split('?').next().unwrap_or(path);
     let lower = path.to_ascii_lowercase();
     if lower.contains("%2e") || lower.contains("%2f") {
-        return true;
+        return Some("percent-encoded dot or slash (%2e, %2f)");
     }
     let binary = urlencoding::decode_binary(path.as_bytes());
     let decoded = String::from_utf8_lossy(&binary);
-    decoded
-        .chars()
-        .any(|c| c == ';' || c == '\\' || c == '%' || c.is_control())
+    decoded.chars().find_map(|c| match c {
+        ';' => Some("path parameter separator (;)"),
+        '\\' => Some("backslash separator"),
+        '%' => Some("percent sign left after decoding (double encoding)"),
+        c if c.is_control() => Some("control character"),
+        _ => None,
+    })
 }
 
 fn default_inject_header() -> String {
@@ -2079,6 +2092,30 @@ mod tests {
         assert!(path_is_ambiguous("/a/b\\c"));
         assert!(path_is_ambiguous("/a/%5c/b"));
         assert!(path_is_ambiguous("/a/%00/b"));
+    }
+
+    #[test]
+    fn ambiguous_path_reason_names_the_construct() {
+        assert_eq!(
+            ambiguous_path_reason("/@mozilla%2ffirefox-devtools-mcp"),
+            Some("percent-encoded dot or slash (%2e, %2f)")
+        );
+        assert_eq!(
+            ambiguous_path_reason("/a/b;v=1/c"),
+            Some("path parameter separator (;)")
+        );
+        assert_eq!(
+            ambiguous_path_reason("/a/%5c/b"),
+            Some("backslash separator")
+        );
+        assert_eq!(
+            ambiguous_path_reason("/a/%252e%252e/b"),
+            Some("percent sign left after decoding (double encoding)")
+        );
+        assert_eq!(ambiguous_path_reason("/a/%00/b"), Some("control character"));
+        assert_eq!(ambiguous_path_reason("/v1/chat/completions"), None);
+        assert_eq!(ambiguous_path_reason("/repos/myrepo/%69ssues"), None);
+        assert_eq!(ambiguous_path_reason("/v1/tasks?filter=a;b&x=%2e"), None);
     }
 
     #[test]

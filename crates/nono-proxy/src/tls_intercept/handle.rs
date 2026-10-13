@@ -748,10 +748,20 @@ pub(crate) async fn select_intercept_route<'a>(
     // A credential catch-all must not be shadowed by an endpoint-only route that
     // gated the request but failed authorization. Mirrors `route::select_route`.
     if has_endpoint_only_route && !endpoint_authorized {
-        let reason = format!(
-            "endpoint rules denied {} {}: no rule matched on {}:{}",
-            method, path, host, port
-        );
+        // An ambiguous path (encoded separator, path parameter, residual
+        // percent) never matches any rule, so say so instead of reporting a
+        // misleading "no rule matched" (issue #1956).
+        let reason = match crate::config::ambiguous_path_reason(path) {
+            Some(detail) => format!(
+                "endpoint rules denied {} {}: path is ambiguous ({}) and is never matched \
+                 against endpoint rules on {}:{}; send the decoded path instead",
+                method, path, detail, host, port
+            ),
+            None => format!(
+                "endpoint rules denied {} {}: no rule matched on {}:{}",
+                method, path, host, port
+            ),
+        };
         warn!("tls_intercept: {}", reason);
         audit::log_denied(
             audit_log,
